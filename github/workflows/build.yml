@@ -1,0 +1,239 @@
+name: Build Server.BD APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ServerBD"
+          include(":app")
+          EOF_0
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_1
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_2'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx1536m
+          EOF_2
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "bd.server.vpn"
+              compileSdk = 34
+              defaultConfig { applicationId = "bd.server.vpn"; minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; isCoreLibraryDesugaringEnabled = true }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("com.wireguard.android:tunnel:1.0.20230706")
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          EOF_3
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application android:label="Server.BD" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_4
+          mkdir -p $(dirname app/src/main/java/bd/server/vpn/MainActivity.kt)
+          cat > app/src/main/java/bd/server/vpn/MainActivity.kt <<'EOF_5'
+          package bd.server.vpn
+
+          import android.content.Context
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.Bundle
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.wireguard.android.backend.GoBackend
+          import com.wireguard.android.backend.Tunnel
+          import com.wireguard.config.Config
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          data class Srv(val code: String, val name: String, var conf: String)
+
+          object Store {
+              private val defaults = listOf("US" to "United States", "GB" to "United Kingdom", "SG" to "Singapore",
+                  "DE" to "Germany", "NL" to "Netherlands", "FR" to "France", "CA" to "Canada", "JP" to "Japan",
+                  "IN" to "India", "AE" to "UAE", "AU" to "Australia", "TR" to "Turkey", "MY" to "Malaysia", "SE" to "Sweden")
+              fun load(c: Context): MutableList<Srv> {
+                  val s = c.getSharedPreferences("srv", 0).getString("list", null)
+                  if (s == null) return defaults.map { Srv(it.first, it.second, "") }.toMutableList()
+                  val a = JSONArray(s)
+                  return MutableList(a.length()) { val o = a.getJSONObject(it); Srv(o.getString("c"), o.getString("n"), o.getString("f")) }
+              }
+              fun save(c: Context, l: List<Srv>) {
+                  val a = JSONArray(); l.forEach { a.put(JSONObject().put("c", it.code).put("n", it.name).put("f", it.conf)) }
+                  c.getSharedPreferences("srv", 0).edit().putString("list", a.toString()).apply()
+              }
+          }
+
+          object Vpn {
+              private var backend: GoBackend? = null
+              private val tunnel = object : Tunnel {
+                  override fun getName() = "serverbd"
+                  override fun onStateChange(newState: Tunnel.State) {}
+              }
+              private fun be(c: Context) = backend ?: GoBackend(c.applicationContext).also { backend = it }
+              fun up(c: Context, conf: String) {
+                  val cfg = Config.parse(conf.byteInputStream())
+                  be(c).setState(tunnel, Tunnel.State.UP, cfg)
+              }
+              fun down(c: Context) { be(c).setState(tunnel, Tunnel.State.DOWN, null) }
+          }
+
+          fun flag(code: String) = code.map { String(Character.toChars(0x1F1E6 + (it - 'A'))) }.joinToString("")
+
+          class MainActivity : ComponentActivity() {
+              private var pending: (() -> Unit)? = null
+              private val perm = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                  if (it.resultCode == RESULT_OK) pending?.invoke(); pending = null
+              }
+              fun withVpnPermission(go: () -> Unit) {
+                  val i = VpnService.prepare(this)
+                  if (i == null) go() else { pending = go; perm.launch(i) }
+              }
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  setContent { MaterialTheme(colorScheme = darkColorScheme()) { App(this) } }
+              }
+          }
+
+          @Composable
+          fun App(act: MainActivity) {
+              val servers = remember { mutableStateListOf<Srv>().apply { addAll(Store.load(act)) } }
+              var sel by remember { mutableStateOf(0) }
+              var on by remember { mutableStateOf(false) }
+              var busy by remember { mutableStateOf(false) }
+              var status by remember { mutableStateOf("Not connected") }
+              var editIdx by remember { mutableStateOf(-1) }
+              var q by remember { mutableStateOf("") }
+
+              fun connect() {
+                  val s = servers[sel]
+                  if (s.conf.isBlank()) { editIdx = sel; return }
+                  busy = true; status = "Connecting to ${s.name}..."
+                  act.withVpnPermission {
+                      Thread {
+                          try { Vpn.up(act, s.conf); on = true; status = "Connected: ${flag(s.code)} ${s.name}" }
+                          catch (e: Exception) { on = false; status = "Failed: ${e.message}" }
+                          busy = false
+                      }.start()
+                  }
+                  if (VpnService.prepare(act) != null) busy = false
+              }
+              fun disconnect() {
+                  busy = true
+                  Thread {
+                      try { Vpn.down(act) } catch (_: Exception) {}
+                      on = false; status = "Not connected"; busy = false
+                  }.start()
+              }
+
+              Column(Modifier.fillMaxSize().background(Color(0xFF0B0F1A)).padding(16.dp)) {
+                  Text("Server.BD", fontSize = 28.sp, color = Color.White)
+                  Spacer(Modifier.height(12.dp))
+                  Column(Modifier.fillMaxWidth().background(Color(0xFF151C2E), RoundedCornerShape(16.dp)).padding(16.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally) {
+                      Text(status, color = if (on) Color(0xFF4ADE80) else Color.LightGray)
+                      Spacer(Modifier.height(10.dp))
+                      Button(enabled = !busy, onClick = { if (on) disconnect() else connect() }) {
+                          Text(if (on) "Disconnect" else "Connect to ${flag(servers[sel].code)} ${servers[sel].name}")
+                      }
+                  }
+                  Spacer(Modifier.height(10.dp))
+                  OutlinedTextField(q, { q = it }, label = { Text("Search country") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                  LazyColumn(Modifier.weight(1f)) {
+                      itemsIndexed(servers) { i, s ->
+                          if (q.isBlank() || s.name.contains(q, true)) {
+                              Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                                  .background(if (i == sel) Color(0xFF1E2A4A) else Color(0xFF111827), RoundedCornerShape(12.dp))
+                                  .clickable {
+                                      sel = i
+                                      if (s.conf.isBlank()) editIdx = i
+                                      else if (on) { Vpn.let { v -> Thread { try { v.down(act); v.up(act, s.conf); status = "Connected: ${flag(s.code)} ${s.name}" } catch (e: Exception) { on = false; status = "Failed: ${e.message}" } }.start() } }
+                                  }.padding(14.dp),
+                                  verticalAlignment = Alignment.CenterVertically) {
+                                  Text(flag(s.code) + "  " + s.name, color = Color.White, modifier = Modifier.weight(1f))
+                                  Text(if (s.conf.isBlank()) "add config" else "ready", color = if (s.conf.isBlank()) Color(0xFFFBBF24) else Color(0xFF4ADE80), fontSize = 12.sp)
+                                  TextButton(onClick = { editIdx = i }) { Text("Edit") }
+                              }
+                          }
+                      }
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                      OutlinedButton({ act.startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }, Modifier.weight(1f)) { Text("Kill switch", fontSize = 11.sp) }
+                      OutlinedButton({ act.startActivity(Intent(Settings.ACTION_DATE_SETTINGS)) }, Modifier.weight(1f)) { Text("Timezone", fontSize = 11.sp) }
+                      OutlinedButton({ act.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }, Modifier.weight(1f)) { Text("GPS", fontSize = 11.sp) }
+                  }
+              }
+
+              if (editIdx >= 0) {
+                  var text by remember(editIdx) { mutableStateOf(servers[editIdx].conf) }
+                  AlertDialog(onDismissRequest = { editIdx = -1 },
+                      title = { Text("WireGuard config: ${servers[editIdx].name}") },
+                      text = { OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth().height(260.dp),
+                          label = { Text("Paste .conf text") }) },
+                      confirmButton = { TextButton({ servers[editIdx] = servers[editIdx].copy(conf = text.trim()); Store.save(act, servers); editIdx = -1 }) { Text("Save") } },
+                      dismissButton = { TextButton({ editIdx = -1 }) { Text("Cancel") } })
+              }
+          }
+          EOF_5
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ServerBD-apk
+          path: app/build/outputs/apk/debug/*.apk
